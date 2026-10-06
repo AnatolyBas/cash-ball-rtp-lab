@@ -1,0 +1,32 @@
+import {formatUnits} from './money.mjs';
+import {validate} from './core.mjs';
+
+const $=id=>document.getElementById(id),worker=new Worker(new URL('./worker.js',import.meta.url),{type:'module'});
+let active=false,stopping=false,page=0,count=0,decimals=2,currency='FUN',started=0,elapsed=0,target=null,chunks=[];
+const total=n=>{let s=BigInt(n).toString().padStart(decimals+1,'0');return decimals?s.slice(0,-decimals)+'.'+s.slice(-decimals):s;};
+const fmt=n=>formatUnits(n,decimals),num=n=>Number(n).toLocaleString('ru-RU',{maximumFractionDigits:2});
+function table(el,data){el.replaceChildren(...data.map(row=>{const tr=document.createElement('tr');for(const value of row){const td=document.createElement('td');td.textContent=String(value);tr.append(td);}return tr;}));}
+function chart(id,points,index,color){const canvas=$(id),ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);if(!points.length)return;const values=points.map(p=>p[index]);if(index===1&&target!==null)values.push(target);let min=Math.min(...values),max=Math.max(...values);if(max===min){max++;min--;}const pad=(max-min)*.12;min-=pad;max+=pad;const y=v=>h-25-(v-min)/(max-min)*(h-45),x=v=>58+v/Math.max(1,points.at(-1)[0])*(w-70);ctx.font='12px Segoe UI';for(let i=0;i<4;i++){const v=min+(max-min)*i/3;ctx.strokeStyle='#283347';ctx.beginPath();ctx.moveTo(55,y(v));ctx.lineTo(w,y(v));ctx.stroke();ctx.fillStyle='#8b9bb3';ctx.fillText(num(index===2?v/10**decimals:v),0,y(v)+4);}if(index===1&&target!==null){ctx.strokeStyle='#e5b852';ctx.setLineDash([6,6]);ctx.beginPath();ctx.moveTo(55,y(target));ctx.lineTo(w,y(target));ctx.stroke();ctx.setLineDash([]);}ctx.strokeStyle=color;ctx.lineWidth=2.5;ctx.beginPath();points.forEach((p,i)=>i?ctx.lineTo(x(p[0]),y(p[index])):ctx.moveTo(x(p[0]),y(p[index])));ctx.stroke();ctx.fillStyle='#8b9bb3';ctx.fillText('Раунд '+num(points.at(-1)[0]),w-130,h-3);}
+function controls(){for(const el of $('settings').elements)el.disabled=active;$('stop').disabled=!active||stopping;$('export').disabled=active||!count;$('prev').disabled=page===0;$('next').disabled=(page+1)*50>=count;}
+function getPage(){worker.postMessage({type:'page',page});}
+$('source').onchange=()=>{const remote=$('source').value==='rgs';$('rgsNote').hidden=!remote;$('delay').value=remote?30:0;$('warning').textContent=remote?'RGS TEST · виртуальные средства. Один незавершённый запрос за раз. Без автоматических повторов ставок.':'ЛОКАЛЬНЫЙ СИМУЛЯТОР. Его вероятности условные: эти результаты не подтверждают RTP сервера.';};
+$('mode').onchange=()=>{$('step').max={easy:20,medium:18,hard:16}[$('mode').value];$('step').value=Math.min(+$('step').value,+$('step').max);};
+$('settings').onsubmit=e=>{e.preventDefault();if(active)return;try{
+ const c={source:$('source').value,mode:$('mode').value,bet:$('bet').value,balance:$('balance').value,rounds:+$('rounds').value,step:+$('step').value,delay:+$('delay').value,seed:+$('seed').value,large:+$('large').value,target:$('target').value===''?null:+$('target').value,virtualConfirmed:$('virtual').checked};validate(c);
+ if(c.source==='rgs'){if(!c.virtualConfirmed)throw Error('Подтвердите виртуальные средства');const url=new URL(location.href);url.searchParams.set('rgs','test');url.searchParams.set('currency',$('currency').value.trim());history.replaceState(null,'',url);c.location=Object.fromEntries(['href','origin','protocol','host','hostname','port','pathname','search','hash'].map(k=>[k,location[k]]));}
+ target=c.target;active=true;stopping=false;count=0;page=0;started=performance.now();elapsed=0;$('progress').max=c.rounds;$('progress').value=0;$('status').textContent='Запуск…';for(const id of ['rtp','dash','wallet','speed','wagered','paid','maxWin','bigWins','net','eta','interval'])$(id).textContent='—';table($('rows'),[]);table($('crashes'),[]);chart('rtpChart',[],1,'');chart('balanceChart',[],2,'');controls();worker.postMessage({type:'start',config:c});
+ }catch(error){$('status').textContent=error.message;}};
+$('stop').onclick=()=>{stopping=true;worker.postMessage({type:'stop'});$('stop').disabled=true;$('status').textContent='Остановка после текущего раунда…';};
+$('prev').onclick=()=>{page--;getPage();};$('next').onclick=()=>{page++;getPage();};
+$('export').onclick=()=>{$('export').disabled=true;worker.postMessage({type:'export'});};
+worker.onmessage=({data:d})=>{
+ if(d.type==='progress'){
+  count=d.completed;decimals=d.decimals;currency=d.currency;elapsed=(performance.now()-started)/1000;$('status').textContent=d.error??d.state;$('progressText').textContent=num(count)+' / '+num(d.total);$('progress').value=count;
+  if(d.stats){const s=d.stats;$('rtp').textContent=num(s.rtp)+'%';$('interval').textContent=s.error===null?'Недостаточно раундов':'95%: '+num(Math.max(0,s.rtp-s.error))+'–'+num(s.rtp+s.error)+'%';$('dash').textContent=num(s.dash);$('wallet').textContent=fmt(s.balance)+' '+currency;$('net').textContent='Изменение: '+fmt(s.balance-s.initial);$('wagered').textContent=total(s.stakes);$('paid').textContent=total(s.paid);$('maxWin').textContent=fmt(s.max);$('bigWins').textContent=num(s.big)+' ('+num(s.n?s.big/s.n*100:0)+'%)';$('mismatch').textContent=num(s.mismatch);$('speed').textContent=num(count/Math.max(.001,elapsed))+' раунд/с';$('eta').textContent='Осталось ≈ '+num(count?(d.total-count)*elapsed/count:0)+' с';table($('crashes'),s.crashes.map(c=>[c.step,'x'+c.multiplier,num(c.count),num(c.count/Math.max(1,s.n)*100)+'%']));chart('rtpChart',d.points,1,'#a9eed5');chart('balanceChart',d.points,2,'#85b5ff');getPage();}
+ }
+ if(d.type==='done'){active=false;controls();getPage();}
+ if(d.type==='page'){table($('rows'),Array.from({length:d.rows.length/8},(_,i)=>{const a=d.rows.slice(i*8,i*8+8);return [a[0],fmt(a[1]),fmt(a[2]),fmt(a[3]),a[4],a[5]?'CRASH · x'+a[5]:'Выплата · x'+a[7],a[6]];}));$('page').textContent='Страница '+(d.page+1)+' / '+Math.max(1,Math.ceil(d.completed/50));controls();}
+ if(d.type==='csv-start')chunks=[];if(d.type==='csv-part')chunks.push(d.text);if(d.type==='csv-end'){const url=URL.createObjectURL(new Blob(chunks,{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download='cash-ball-rtp-'+new Date().toISOString().replaceAll(':','-')+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),60000);chunks=[];controls();}
+};
+worker.onerror=e=>{active=false;$('status').textContent='Ошибка рабочего процесса: '+e.message;controls();};
+window.addEventListener('beforeunload',e=>{if(active){e.preventDefault();e.returnValue='';}});
